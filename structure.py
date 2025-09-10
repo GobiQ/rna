@@ -78,8 +78,8 @@ class RNAStructurePredictor:
         }
     
     def is_valid_rna(self, sequence):
-        """Validate RNA sequence"""
-        return bool(re.match(r'^[AUGC]+$', sequence.upper()))
+        """Validate RNA sequence (allows T for DNA sequences)"""
+        return bool(re.match(r'^[AUTGC]+$', sequence.upper()))
     
     def can_pair(self, base1, base2):
         """Check if two bases can pair"""
@@ -229,6 +229,12 @@ def main():
         }
         
         selected_example = st.selectbox("Choose an example:", ["None"] + list(examples.keys()))
+        
+        # Input options
+        st.markdown("#### Input Options")
+        convert_t_to_u = st.checkbox("Convert T to U", value=True, help="Convert DNA sequence to RNA")
+        remove_spaces = st.checkbox("Remove spaces", value=True)
+        uppercase = st.checkbox("Convert to uppercase", value=True)
     
     # Main input
     st.markdown('<div class="section-header">Input RNA Sequence</div>', unsafe_allow_html=True)
@@ -240,19 +246,25 @@ def main():
             default_seq = examples[selected_example]
         else:
             default_seq = ""
+        
+        # Dynamic label based on conversion settings
+        if convert_t_to_u:
+            sequence_label = "Enter sequence (DNA or RNA):"
+        else:
+            sequence_label = "Enter RNA sequence (A, U, G, C only):"
             
         sequence_input = st.text_area(
-            "Enter RNA sequence (A, U, G, C only):",
+            sequence_label,
             value=default_seq,
             height=100,
             placeholder="GGCUUUAGCCUUCGCCACCAUGAGCG..."
         )
     
     with col2:
-        st.markdown("**Input Options:**")
-        convert_t_to_u = st.checkbox("Convert T to U", value=True, help="Convert DNA sequence to RNA")
-        remove_spaces = st.checkbox("Remove spaces", value=True)
-        uppercase = st.checkbox("Convert to uppercase", value=True)
+        st.markdown("**Current Settings:**")
+        st.markdown(f"• Convert T to U: {'✅' if convert_t_to_u else '❌'}")
+        st.markdown(f"• Remove spaces: {'✅' if remove_spaces else '❌'}")
+        st.markdown(f"• Uppercase: {'✅' if uppercase else '❌'}")
     
     # Process sequence
     if sequence_input:
