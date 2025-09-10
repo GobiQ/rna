@@ -4,13 +4,43 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.patches import FancyBboxPatch, Circle, ConnectionPatch
-import seaborn as sns
 from io import StringIO
 import re
 import base64
 import math
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional
+import functools
+
+# Utility functions for structure analysis
+def build_partner_map(structure: str) -> List[int]:
+    """Build partner map from dot-bracket notation"""
+    partner = [-1] * len(structure)
+    stck = []
+    for i, ch in enumerate(structure):
+        if ch == '(':
+            stck.append(i)
+        elif ch == ')':
+            if stck:
+                j = stck.pop()
+                partner[i] = j
+                partner[j] = i
+    return partner
+
+def depth_array(structure: str) -> List[int]:
+    """Calculate depth at each position in structure"""
+    d = 0
+    out = []
+    for ch in structure:
+        if ch == '(':
+            d += 1
+            out.append(d)
+        elif ch == ')':
+            out.append(d)
+            d -= 1
+        else:
+            out.append(d)
+    return out
 
 # Set page config
 st.set_page_config(
@@ -84,8 +114,6 @@ class StructuralElement:
     end: int
     loop_size: Optional[int] = None
     sequence: Optional[str] = None
-    paired_with: Optional[int] = None
-    stem_length: Optional[int] = None
 
 class RNA2DLayoutEngine:
     """Engine for creating 2D RNA structure layouts"""
@@ -113,34 +141,62 @@ class RNA2DLayoutEngine:
         return pairs
     
     def _analyze_structure_elements(self) -> List[StructuralElement]:
-        """Analyze and categorize structural elements"""
-        elements = []
-        
-        # Find stems and loops
-        for start, end in self.base_pairs:
-            # Check for hairpin loops
-            loop_size = end - start - 1
-            if loop_size > 0:
-                loop_seq = self.sequence[start+1:end]
-                
-                # Determine loop type
-                if loop_size <= 8:  # Typical hairpin
-                    elements.append(StructuralElement(
-                        type='hairpin',
-                        start=start,
-                        end=end,
-                        loop_size=loop_size,
-                        sequence=loop_seq
-                    ))
-                else:  # Larger internal loop
-                    elements.append(StructuralElement(
-                        type='internal_loop',
-                        start=start,
-                        end=end,
-                        loop_size=loop_size,
-                        sequence=loop_seq
-                    ))
-        
+        """Analyze and categorize structural elements with proper classification"""
+        s = self.sequence
+        dot = self.structure
+        n = len(dot)
+        partner = build_partner_map(dot)
+        elements: List[StructuralElement] = []
+
+        # Visit each closing pair once (i < j, partner[i] = j)
+        visited = set()
+        for i in range(n):
+            j = partner[i]
+            if j == -1 or i > j or (i,j) in visited: 
+                continue
+            visited.add((i,j))
+
+            # hairpin if no other pairs inside
+            has_pair_inside = any(partner[k] != -1 and partner[k] > k and i < k < partner[k] < j
+                                  for k in range(i+1, j))
+            if not has_pair_inside:
+                loop_seq = s[i+1:j]
+                elements.append(StructuralElement("hairpin", i, j, j-i-1, loop_seq))
+                continue
+
+            # classify immediate unpaired runs adjacent to the helix ends
+            # left side (i+1 .. ?) until next paired pos or j
+            a = i+1
+            left_unpaired = 0
+            while a < j and partner[a] == -1:
+                left_unpaired += 1
+                a += 1
+            # right side (? .. j-1) from j-1 downward
+            b = j-1
+            right_unpaired = 0
+            while b > i and partner[b] == -1:
+                right_unpaired += 1
+                b -= 1
+
+            # count how many helices meet inside (multiloop detection)
+            branches = 0
+            k = i+1
+            while k < j:
+                if partner[k] > k:
+                    branches += 1
+                    k = partner[k] + 1
+                else:
+                    k += 1
+
+            loop_seq = s[i+1:j]
+            loop_len = j-i-1
+            if branches >= 2:
+                elements.append(StructuralElement("multibranch", i, j, loop_len, loop_seq))
+            elif (left_unpaired and not right_unpaired) or (right_unpaired and not left_unpaired):
+                elements.append(StructuralElement("bulge", i, j, loop_len, loop_seq))
+            else:
+                elements.append(StructuralElement("internal_loop", i, j, loop_len, loop_seq))
+
         return elements
     
     def calculate_radial_layout(self) -> Dict[int, Tuple[float, float]]:
@@ -239,6 +295,9 @@ class RNAStructurePredictor:
             'bulge': 3.8,
             'internal': 4.1
         }
+        
+        # Maximum sequence length for performance
+        self.max_sequence_length = 800
     
     def is_valid_rna(self, sequence):
         """Validate RNA sequence (allows T for DNA sequences)"""
@@ -249,6 +308,44 @@ class RNAStructurePredictor:
         valid_chars = set('AUTGC')
         return [char for char in set(sequence.upper()) if char not in valid_chars]
     
+    def validate_dot_bracket(self, structure):
+        """Validate dot-bracket notation balance"""
+        stack = []
+        for i, char in enumerate(structure):
+            if char == '(':
+                stack.append(i)
+            elif char == ')':
+                if not stack:
+                    return False, f"Unmatched ')' at position {i+1}"
+                stack.pop()
+        if stack:
+            return False, f"Unmatched '(' at position {stack[-1]+1}"
+        return True, "Valid structure"
+    
+    def detect_pseudoknots(self, structure):
+        """Detect pseudoknots in dot-bracket notation"""
+        # Simple pseudoknot detection: look for non-nested pair crossings
+        stack = []
+        pairs = []
+        
+        for i, char in enumerate(structure):
+            if char == '(':
+                stack.append(i)
+            elif char == ')':
+                if stack:
+                    pairs.append((stack.pop(), i))
+        
+        # Check for crossing pairs
+        for i in range(len(pairs)):
+            for j in range(i+1, len(pairs)):
+                a, b = pairs[i]
+                c, d = pairs[j]
+                # Check if pairs cross: a < c < b < d or c < a < d < b
+                if (a < c < b < d) or (c < a < d < b):
+                    return True, f"Pseudoknot detected between positions {a+1}-{b+1} and {c+1}-{d+1}"
+        
+        return False, "No pseudoknots detected"
+    
     def can_pair(self, base1, base2):
         """Check if two bases can pair"""
         return (base1, base2) in self.base_pairs
@@ -258,16 +355,21 @@ class RNAStructurePredictor:
         return self.base_pairs.get((base1, base2), 0)
     
     def simple_fold(self, sequence):
-        """Enhanced folding algorithm with better energy estimation"""
+        """Enhanced folding algorithm with consistent energy estimation"""
         n = len(sequence)
         if n < 4:
             return '.' * n, 0.0
         
-        # DP table for maximum number of base pairs
+        # Check sequence length for performance
+        if n > self.max_sequence_length:
+            st.warning(f"⚠️ Sequence length ({n}) exceeds recommended maximum ({self.max_sequence_length}). "
+                      f"Prediction may be slow or incomplete. Consider using a shorter sequence.")
+        
+        # DP table for maximum number of base pairs (Nussinov-style)
         dp = [[0 for _ in range(n)] for _ in range(n)]
         traceback = [[None for _ in range(n)] for _ in range(n)]
         
-        # Fill DP table with improved scoring
+        # Fill DP table with pair counting (not energy mixing)
         for length in range(4, n + 1):
             for i in range(n - length + 1):
                 j = i + length - 1
@@ -278,16 +380,15 @@ class RNAStructurePredictor:
                 
                 # Option 2: pair i and j (if possible)
                 if self.can_pair(sequence[i], sequence[j]) and j - i >= 3:
-                    # Base pairing energy bonus
-                    energy_gain = abs(self.get_pairing_energy(sequence[i], sequence[j]))
+                    # Count a pair (not energy-based)
+                    energy_gain = 1  # count a pair
                     
-                    # Add stacking bonus if possible
+                    # Add small stacking bonus (dimensionless)
                     stacking_bonus = 0
                     if i > 0 and j < n-1 and self.can_pair(sequence[i-1], sequence[j+1]):
-                        pair_type = sequence[i] + sequence[j]
-                        stacking_bonus = self.stacking_energies.get(pair_type, 0)
+                        stacking_bonus = 0.2  # tiny bonus, still dimensionless
                     
-                    total_score = dp[i+1][j-1] + energy_gain + abs(stacking_bonus)
+                    total_score = dp[i+1][j-1] + energy_gain + stacking_bonus
                     
                     if total_score > dp[i][j]:
                         dp[i][j] = total_score
@@ -303,7 +404,7 @@ class RNAStructurePredictor:
         structure = ['.'] * n
         self._traceback(sequence, traceback, structure, 0, n-1)
         
-        # Calculate free energy with loop penalties
+        # Calculate free energy with loop penalties (separate from DP)
         free_energy = self._calculate_detailed_energy(sequence, ''.join(structure))
         
         return ''.join(structure), free_energy
@@ -325,29 +426,48 @@ class RNAStructurePredictor:
             self._traceback(sequence, traceback, structure, i, j-1)
     
     def _calculate_detailed_energy(self, sequence, structure):
-        """Calculate detailed free energy with loop penalties"""
+        """Calculate detailed free energy with proper loop penalties"""
+        partner = build_partner_map(structure)
         energy = 0.0
-        stack = []
-        
-        # Base pairing energies
-        for i, symbol in enumerate(structure):
-            if symbol == '(':
-                stack.append(i)
-            elif symbol == ')' and stack:
-                j = stack.pop()
-                energy += self.get_pairing_energy(sequence[j], sequence[i])
-                
-                # Add loop penalty
-                loop_size = i - j - 1
-                if loop_size > 0:
-                    if loop_size <= 9:
-                        energy += self.loop_penalties['hairpin'].get(loop_size, 7.0)
-                    else:
-                        energy += 7.0 + 1.75 * np.log(loop_size / 9.0)
-        
+        n = len(structure)
+        visited = set()
+
+        # base pair energies
+        for i in range(n):
+            j = partner[i]
+            if j != -1 and i < j and (i,j) not in visited:
+                visited.add((i,j))
+                energy += self.get_pairing_energy(sequence[i], sequence[j])
+
+        # loop penalties using proper classification
+        layout = RNA2DLayoutEngine(sequence, structure)
+        elems = layout._analyze_structure_elements()
+        for e in elems:
+            if e.type == "hairpin":
+                L = e.loop_size
+                if L <= 9:
+                    energy += self.loop_penalties['hairpin'].get(L, 7.0)
+                else:
+                    energy += 7.0 + 1.75 * np.log(L/9.0)
+            elif e.type == "bulge":
+                # simple linear penalty per nt (coarse)
+                energy += self.loop_penalties['bulge'] + 0.3 * e.loop_size
+            elif e.type == "internal_loop":
+                energy += self.loop_penalties['internal'] + 0.2 * e.loop_size
+            elif e.type == "multibranch":
+                # a coarse constant + per-branch penalty
+                energy += 3.0 + 0.5 * 3  # tune as desired
+
         return energy
 
-def create_2d_structure_plot(sequence: str, structure: str, energy: float):
+# Cached folding function for performance
+@st.cache_data(show_spinner=False)
+def fold_cached(seq: str) -> Tuple[str, float]:
+    """Cached version of RNA folding for performance"""
+    predictor = RNAStructurePredictor()
+    return predictor.simple_fold(seq)
+
+def create_2d_structure_plot(sequence: str, structure: str, energy: float, show_labels: bool = True, color_by_depth: bool = False):
     """Create enhanced 2D structure visualization like the reference image"""
     
     layout_engine = RNA2DLayoutEngine(sequence, structure)
@@ -359,16 +479,16 @@ def create_2d_structure_plot(sequence: str, structure: str, energy: float):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 10))
     
     # Plot 1: Hierarchical layout
-    _plot_structure_layout(ax1, sequence, structure, positions, "Hierarchical Layout", energy)
+    _plot_structure_layout(ax1, sequence, structure, positions, "Hierarchical Layout", energy, show_labels, color_by_depth)
     
     # Plot 2: Radial layout for comparison
     radial_positions = layout_engine.calculate_radial_layout()
-    _plot_structure_layout(ax2, sequence, structure, radial_positions, "Radial Layout", energy)
+    _plot_structure_layout(ax2, sequence, structure, radial_positions, "Radial Layout", energy, show_labels, color_by_depth)
     
     plt.tight_layout()
     return fig
 
-def _plot_structure_layout(ax, sequence: str, structure: str, positions: Dict[int, Tuple[float, float]], title: str, energy: float):
+def _plot_structure_layout(ax, sequence: str, structure: str, positions: Dict[int, Tuple[float, float]], title: str, energy: float, show_labels: bool = True, color_by_depth: bool = False):
     """Helper function to plot RNA structure layout"""
     
     # Base colors
@@ -380,10 +500,25 @@ def _plot_structure_layout(ax, sequence: str, structure: str, positions: Dict[in
         'T': '#3498db'   # Blue (same as U)
     }
     
+    # Calculate depth map for color-by-depth option
+    if color_by_depth:
+        depths = depth_array(structure)
+        max_depth = max(depths) if depths else 0
+    else:
+        depths = None
+        max_depth = 0
+    
     # Plot nucleotides
     for i, (x, y) in positions.items():
         base = sequence[i]
-        color = base_colors.get(base, '#95a5a6')
+        
+        if color_by_depth and depths and max_depth > 0:
+            # Use depth-based coloring
+            depth_ratio = depths[i] / max_depth
+            color = plt.cm.viridis(depth_ratio)
+        else:
+            # Use base-specific coloring
+            color = base_colors.get(base, '#95a5a6')
         
         # Draw nucleotide circle
         circle = Circle((x, y), 0.3, facecolor=color, edgecolor='black', linewidth=1.5, alpha=0.8)
@@ -437,8 +572,9 @@ def _plot_structure_layout(ax, sequence: str, structure: str, positions: Dict[in
             
             color_idx += 1
     
-    # Identify and label structural elements
-    _label_structural_elements(ax, sequence, structure, positions)
+    # Identify and label structural elements only if requested
+    if show_labels:
+        _label_structural_elements(ax, sequence, structure, positions)
     
     # Set axis properties
     ax.set_aspect('equal')
@@ -451,8 +587,9 @@ def _plot_structure_layout(ax, sequence: str, structure: str, positions: Dict[in
         plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#3498db', markersize=10, label='U/T'),
         plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#2ecc71', markersize=10, label='G'),
         plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#f39c12', markersize=10, label='C'),
-        plt.Line2D([0], [0], color='black', linewidth=2, label='Base Pairs'),
-        plt.Line2D([0], [0], color='black', linewidth=2, linestyle='--', label='Wobble Pairs')
+        plt.Line2D([0], [0], color='k', linewidth=1, label='GC triple (×3)'),
+        plt.Line2D([0], [0], color='k', linewidth=1, linestyle='-', label='AU double (×2)'),
+        plt.Line2D([0], [0], color='k', linewidth=2, linestyle='--', label='GU wobble')
     ]
     ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.15, 1))
 
@@ -511,7 +648,7 @@ def analyze_sequence(sequence):
     
     return composition, gc_content
 
-def create_comprehensive_analysis_plot(sequence, structure, energy):
+def create_comprehensive_analysis_plot(sequence, structure, energy, predictor=None):
     """Create comprehensive analysis including composition, energy landscape, etc."""
     fig = plt.figure(figsize=(20, 15))
     
@@ -567,7 +704,7 @@ def create_comprehensive_analysis_plot(sequence, structure, energy):
     
     # Energy landscape
     ax4 = fig.add_subplot(gs[1, :])
-    _plot_energy_landscape(ax4, sequence, structure, energy)
+    _plot_energy_landscape(ax4, sequence, structure, energy, predictor)
     
     # Main 2D structure (spanning multiple cells)
     ax5 = fig.add_subplot(gs[2, :])
@@ -582,8 +719,19 @@ def create_comprehensive_analysis_plot(sequence, structure, energy):
     plt.tight_layout()
     return fig
 
-def _plot_energy_landscape(ax, sequence, structure, energy):
+def _plot_energy_landscape(ax, sequence, structure, energy, predictor=None):
     """Plot energy landscape along the sequence"""
+    # Use provided predictor or create one
+    if predictor is None:
+        predictor = RNAStructurePredictor()
+    
+    # Precompute pairing energies for efficiency
+    pairing_energies = {}
+    for i in range(len(sequence)):
+        for j in range(i+1, len(sequence)):
+            if predictor.can_pair(sequence[i], sequence[j]):
+                pairing_energies[(i, j)] = predictor.get_pairing_energy(sequence[i], sequence[j])
+    
     # Simplified energy profile
     positions = range(len(sequence))
     energies = []
@@ -598,8 +746,7 @@ def _plot_energy_landscape(ax, sequence, structure, energy):
         elif char == ')' and stack:
             start = stack.pop()
             # Base pairing energy
-            predictor = RNAStructurePredictor()
-            pair_energy = predictor.get_pairing_energy(sequence[start], sequence[i])
+            pair_energy = pairing_energies.get((start, i), 0)
             current_energy += pair_energy
         else:
             current_energy += 0.1  # Loop penalty
@@ -610,17 +757,19 @@ def _plot_energy_landscape(ax, sequence, structure, energy):
     ax.fill_between(positions, energies, alpha=0.3, color='lightblue')
     ax.set_title('Energy Landscape Along Sequence', fontsize=12, fontweight='bold')
     ax.set_xlabel('Position')
-    ax.set_ylabel('Cumulative Energy (kcal/mol)')
+    ax.set_ylabel('Cumulative Pseudo-Energy (arbitrary units)')
     ax.grid(True, alpha=0.3)
     
-    # Highlight base pairs
+    # Highlight base pairs with thinner overlays
     stack = []
     for i, char in enumerate(structure):
         if char == '(':
             stack.append(i)
         elif char == ')' and stack:
             start = stack.pop()
-            ax.axvspan(start, i, alpha=0.2, color='green')
+            # Use vertical lines at pair midpoints instead of large spans
+            mid_point = (start + i) / 2
+            ax.axvline(mid_point, alpha=0.3, color='green', linewidth=2)
 
 def _plot_structural_elements_summary(ax, sequence, structure):
     """Plot summary of structural elements"""
@@ -630,32 +779,41 @@ def _plot_structural_elements_summary(ax, sequence, structure):
         'Hairpins': 0,
         'Internal Loops': 0,
         'Bulges': 0,
+        'Multibranch': 0,
         'Stems': 0
     }
     
-    stack = []
-    for i, char in enumerate(structure):
-        if char == '(':
-            stack.append(i)
-        elif char == ')' and stack:
-            start = stack.pop()
-            loop_size = i - start - 1
-            
-            elements['Stems'] += 1
-            
-            if loop_size == 0:
-                continue
-            elif loop_size <= 8:
-                elements['Hairpins'] += 1
-            elif loop_size <= 2:
-                elements['Bulges'] += 1
-            else:
-                elements['Internal Loops'] += 1
+    # Use the proper structural element analysis
+    layout_engine = RNA2DLayoutEngine(sequence, structure)
+    structural_elements = layout_engine._analyze_structure_elements()
+    
+    # Count elements by type
+    for element in structural_elements:
+        if element.type == 'hairpin':
+            elements['Hairpins'] += 1
+        elif element.type == 'internal_loop':
+            elements['Internal Loops'] += 1
+        elif element.type == 'bulge':
+            elements['Bulges'] += 1
+        elif element.type == 'multibranch':
+            elements['Multibranch'] += 1
+    
+    # Count stems (contiguous base-paired runs)
+    stems = 0
+    in_stem = False
+    for ch in structure:
+        if ch == '(' or ch == ')':
+            if not in_stem: 
+                stems += 1
+                in_stem = True
+        else:
+            in_stem = False
+    elements['Stems'] = stems
     
     # Create bar plot
     element_names = list(elements.keys())
     element_counts = list(elements.values())
-    colors = ['#e74c3c', '#f39c12', '#9b59b6', '#3498db']
+    colors = ['#e74c3c', '#f39c12', '#9b59b6', '#8e44ad', '#3498db']
     
     bars = ax.bar(element_names, element_counts, color=colors, alpha=0.8, edgecolor='white', linewidth=2)
     ax.set_title('Structural Elements Summary', fontsize=12, fontweight='bold')
@@ -758,6 +916,11 @@ def main():
         if predictor.is_valid_rna(processed_seq):
             st.success(f"✅ Valid RNA sequence of length {len(processed_seq)}")
             
+            # Check for T in sequence when conversion is disabled
+            if not convert_t_to_u and 'T' in processed_seq:
+                st.warning("⚠️ Contains T nucleotides. Consider enabling 'Convert T to U' for RNA analysis.")
+                st.info("💡 T will be treated as U in base coloring and structure prediction.")
+            
             # Display processed sequence
             st.markdown('<div class="section-header">Processed Sequence</div>', unsafe_allow_html=True)
             
@@ -784,9 +947,19 @@ def main():
             with col4:
                 st.metric("Structure Complexity", "Calculating...")
             
-            # Structure prediction
+            # Structure prediction with caching
             with st.spinner("Predicting RNA structure using enhanced algorithm..."):
-                structure, energy = predictor.simple_fold(processed_seq)
+                structure, energy = fold_cached(processed_seq)
+            
+            # Validate structure and check for pseudoknots
+            is_valid, validation_msg = predictor.validate_dot_bracket(structure)
+            has_pseudoknot, pseudoknot_msg = predictor.detect_pseudoknots(structure)
+            
+            if not is_valid:
+                st.error(f"❌ Structure validation failed: {validation_msg}")
+            elif has_pseudoknot:
+                st.warning(f"⚠️ {pseudoknot_msg}")
+                st.info("💡 Note: This predictor does not support pseudoknots. The structure shown may be simplified.")
             
             # Calculate additional metrics
             base_pairs = structure.count('(')
@@ -822,8 +995,8 @@ def main():
                     formatted_struct += f"{line_start:>5}: {line}\n"
                 st.markdown(f'<div class="structure-display">{formatted_struct}</div>', unsafe_allow_html=True)
             
-            # Enhanced energy information
-            stability = "High" if energy < -10 else "Medium" if energy < -5 else "Low"
+            # Enhanced energy information with corrected thresholds
+            stability = "High" if energy < -15 else "Medium" if energy < -8 else "Low"
             pairing_efficiency = (base_pairs * 2 / len(processed_seq) * 100)
             
             st.markdown(f'''
@@ -849,8 +1022,9 @@ def main():
             
             if layout_type == "Both":
                 st.markdown("**Comparison of Layout Algorithms:**")
-                fig = create_2d_structure_plot(processed_seq, structure, energy)
+                fig = create_2d_structure_plot(processed_seq, structure, energy, show_labels, color_by_structure)
                 st.pyplot(fig)
+                plt.close(fig)  # Clean up memory
             else:
                 # Single layout
                 layout_engine = RNA2DLayoutEngine(processed_seq, structure)
@@ -861,20 +1035,18 @@ def main():
                     positions = layout_engine.calculate_radial_layout()
                 
                 fig, ax = plt.subplots(1, 1, figsize=(15, 12))
-                _plot_structure_layout(ax, processed_seq, structure, positions, f"{layout_type} Layout", energy)
-                
-                # Enhance with labels if requested
-                if show_labels:
-                    _label_structural_elements(ax, processed_seq, structure, positions)
+                _plot_structure_layout(ax, processed_seq, structure, positions, f"{layout_type} Layout", energy, show_labels, color_by_structure)
                 
                 st.pyplot(fig)
+                plt.close(fig)  # Clean up memory
             
             # Comprehensive Analysis
             if show_energy_profile:
                 st.markdown('<div class="section-header">📊 Comprehensive Structure Analysis</div>', unsafe_allow_html=True)
                 
-                comp_fig = create_comprehensive_analysis_plot(processed_seq, structure, energy)
+                comp_fig = create_comprehensive_analysis_plot(processed_seq, structure, energy, predictor)
                 st.pyplot(comp_fig)
+                plt.close(comp_fig)  # Clean up memory
             
             # Detailed structural analysis
             st.markdown('<div class="section-header">🔍 Structural Elements Breakdown</div>', unsafe_allow_html=True)
@@ -886,6 +1058,8 @@ def main():
             # Categorize elements
             hairpins = [e for e in elements if e.type == 'hairpin']
             internal_loops = [e for e in elements if e.type == 'internal_loop']
+            bulges = [e for e in elements if e.type == 'bulge']
+            multibranch = [e for e in elements if e.type == 'multibranch']
             
             col1, col2, col3 = st.columns(3)
             
@@ -905,10 +1079,11 @@ def main():
                     st.info("No hairpin loops detected")
             
             with col2:
-                st.markdown("#### 🔄 Internal Loops & Bulges")
-                if internal_loops:
-                    for i, loop in enumerate(internal_loops):
-                        loop_type = "Bulge" if loop.loop_size <= 3 else "Internal Loop"
+                st.markdown("#### 🔄 Internal Loops, Bulges & Multibranch")
+                all_loops = internal_loops + bulges + multibranch
+                if all_loops:
+                    for i, loop in enumerate(all_loops):
+                        loop_type = loop.type.replace('_', ' ').title()
                         with st.expander(f"{loop_type} {i+1} (positions {loop.start+1}-{loop.end+1})"):
                             st.markdown(f"**Sequence:** `{loop.sequence}`")
                             st.markdown(f"**Size:** {loop.loop_size} nucleotides")
@@ -917,7 +1092,7 @@ def main():
                             if loop.loop_size > 10:
                                 st.warning("⚠️ Large loop - may affect structure stability")
                 else:
-                    st.info("No internal loops or bulges detected")
+                    st.info("No internal loops, bulges, or multibranch structures detected")
             
             with col3:
                 st.markdown("#### 🔗 Base Pairing Analysis")
@@ -973,11 +1148,11 @@ def main():
                 quality_score += 10
                 quality_factors.append("❌ Low pairing efficiency")
             
-            # Factor 2: Energy stability
-            if energy < -15:
+            # Factor 2: Energy stability (updated thresholds)
+            if energy < -20:
                 quality_score += 30
                 quality_factors.append("✅ Very stable structure")
-            elif energy < -8:
+            elif energy < -12:
                 quality_score += 20
                 quality_factors.append("⚠️ Moderately stable structure")
             else:
@@ -1098,7 +1273,7 @@ Analysis date: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}
                 )
             
             with col2:
-                # CSV format for data analysis
+                # CSV format for data analysis with partner index map
                 csv_data = []
                 csv_data.append(['Metric', 'Value'])
                 csv_data.append(['Sequence_Length', len(processed_seq)])
@@ -1119,7 +1294,31 @@ Analysis date: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}
                 st.download_button(
                     label="📊 Download CSV Data",
                     data=csv_string,
-                    file_name=f"rna_metrics_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    file_name=f"rna_metrics_{len(processed_seq)}L_{gc_content:.0f}GC_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+                
+                # Partner index map CSV
+                partner_map = build_partner_map(structure)
+                depths = depth_array(structure)
+                
+                partner_data = []
+                for i in range(len(processed_seq)):
+                    partner_data.append([
+                        i + 1,  # 1-based position
+                        processed_seq[i],
+                        structure[i],
+                        partner_map[i] + 1 if partner_map[i] != -1 else 0,  # 1-based indexing
+                        depths[i]  # correct depth at position
+                    ])
+                
+                partner_df = pd.DataFrame(partner_data, columns=['Position', 'Base', 'Structure', 'Partner_Position', 'Depth'])
+                partner_csv = partner_df.to_csv(index=False)
+                
+                st.download_button(
+                    label="🔗 Download Partner Map",
+                    data=partner_csv,
+                    file_name=f"rna_partner_map_{len(processed_seq)}L_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
                     mime="text/csv"
                 )
             
@@ -1134,7 +1333,7 @@ Analysis date: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}
                 st.download_button(
                     label="🧬 Download FASTA Format",
                     data=fasta_content,
-                    file_name=f"rna_structure_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.fasta",
+                    file_name=f"rna_structure_{len(processed_seq)}L_{gc_content:.0f}GC_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.fasta",
                     mime="text/plain"
                 )
             
