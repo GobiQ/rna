@@ -222,7 +222,8 @@ class RNAStructurePredictor:
 
 def analyze_sequence(sequence):
     """Analyze RNA sequence composition"""
-    composition = {base: sequence.count(base) for base in 'AUGC'}
+    sequence_upper = sequence.upper()
+    composition = {base: sequence_upper.count(base) for base in 'AUGC'}
     gc_content = (composition['G'] + composition['C']) / len(sequence) * 100
     
     return composition, gc_content
