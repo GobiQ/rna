@@ -2,10 +2,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 import seaborn as sns
 from io import StringIO
 import re
 import base64
+import math
 
 # Set page config
 st.set_page_config(
@@ -15,18 +17,18 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# Custom CSS with improved readability
 st.markdown("""
 <style>
     .main-header {
         font-size: 2.5rem;
-        color: #1f77b4;
+        color: #2c3e50;
         text-align: center;
         margin-bottom: 2rem;
     }
     .section-header {
         font-size: 1.5rem;
-        color: #2c3e50;
+        color: #34495e;
         margin-top: 2rem;
         margin-bottom: 1rem;
         border-bottom: 2px solid #3498db;
@@ -34,28 +36,39 @@ st.markdown("""
     }
     .sequence-display {
         font-family: 'Courier New', monospace;
-        background-color: #f8f9fa;
+        font-size: 14px;
+        background-color: #ffffff;
+        color: #2c3e50;
         padding: 1rem;
         border-radius: 0.5rem;
-        border: 1px solid #dee2e6;
+        border: 2px solid #bdc3c7;
         white-space: pre-wrap;
         word-break: break-all;
+        line-height: 1.4;
     }
     .structure-display {
         font-family: 'Courier New', monospace;
-        background-color: #e8f5e8;
+        font-size: 14px;
+        background-color: #ffffff;
+        color: #27ae60;
         padding: 1rem;
         border-radius: 0.5rem;
-        border: 1px solid #28a745;
+        border: 2px solid #27ae60;
         white-space: pre-wrap;
         word-break: break-all;
+        line-height: 1.4;
     }
     .energy-box {
-        background-color: #fff3cd;
-        border: 1px solid #ffeaa7;
+        background-color: #ffffff;
+        color: #2c3e50;
+        border: 2px solid #f39c12;
         border-radius: 0.5rem;
-        padding: 1rem;
+        padding: 1.5rem;
         margin: 1rem 0;
+    }
+    .energy-box h4 {
+        color: #e67e22;
+        margin-bottom: 1rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -163,6 +176,49 @@ class RNAStructurePredictor:
                 energy += self.get_pairing_energy(sequence[j], sequence[i])
         
         return energy
+    
+    def analyze_structure_elements(self, sequence, structure):
+        """Analyze structural elements like hairpins, bulges, etc."""
+        elements = []
+        stack = []
+        
+        for i, symbol in enumerate(structure):
+            if symbol == '(':
+                stack.append(i)
+            elif symbol == ')' and stack:
+                start = stack.pop()
+                stem_length = 1
+                
+                # Check if this is part of a longer stem
+                j = start - 1
+                k = i + 1
+                while (j >= 0 and k < len(structure) and 
+                       structure[j] == '(' and structure[k] == ')'):
+                    stem_length += 1
+                    j -= 1
+                    k += 1
+                
+                # Calculate loop size
+                loop_size = i - start - 1
+                
+                if loop_size <= 6:  # Hairpin loop
+                    elements.append({
+                        'type': 'hairpin',
+                        'start': start,
+                        'end': i,
+                        'stem_length': stem_length,
+                        'loop_size': loop_size
+                    })
+                elif loop_size > 6:  # Internal loop or bulge
+                    elements.append({
+                        'type': 'internal_loop',
+                        'start': start,
+                        'end': i,
+                        'stem_length': stem_length,
+                        'loop_size': loop_size
+                    })
+        
+        return elements
 
 def analyze_sequence(sequence):
     """Analyze RNA sequence composition"""
@@ -171,20 +227,92 @@ def analyze_sequence(sequence):
     
     return composition, gc_content
 
-def create_structure_plot(sequence, structure, energy):
-    """Create a simple visualization of the RNA structure"""
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
+def create_structure_visualization(sequence, structure, energy):
+    """Create comprehensive RNA structure visualization"""
+    fig = plt.figure(figsize=(16, 12))
+    
+    # Create subplots
+    gs = fig.add_gridspec(3, 2, height_ratios=[1, 1.5, 1], width_ratios=[1, 1])
+    
+    ax1 = fig.add_subplot(gs[0, 0])  # Base composition
+    ax2 = fig.add_subplot(gs[0, 1])  # GC content pie chart
+    ax3 = fig.add_subplot(gs[1, :])  # Structure arc diagram
+    ax4 = fig.add_subplot(gs[2, :])  # Linear structure plot
     
     # Plot 1: Base composition
     bases = ['A', 'U', 'G', 'C']
     counts = [sequence.count(base) for base in bases]
-    colors = ['red', 'blue', 'green', 'orange']
+    colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12']
     
-    ax1.bar(bases, counts, color=colors, alpha=0.7)
-    ax1.set_title('Base Composition')
+    bars = ax1.bar(bases, counts, color=colors, alpha=0.8, edgecolor='white', linewidth=2)
+    ax1.set_title('Base Composition', fontsize=14, fontweight='bold')
     ax1.set_ylabel('Count')
+    ax1.grid(True, alpha=0.3)
     
-    # Plot 2: Structure representation (simplified)
+    # Add count labels on bars
+    for bar, count in zip(bars, counts):
+        height = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width()/2., height + 0.1,
+                f'{count}', ha='center', va='bottom', fontweight='bold')
+    
+    # Plot 2: GC content
+    gc_count = sequence.count('G') + sequence.count('C')
+    at_count = len(sequence) - gc_count
+    
+    wedges, texts, autotexts = ax2.pie([gc_count, at_count], 
+                                      labels=['GC', 'AU'], 
+                                      colors=['#27ae60', '#e74c3c'],
+                                      autopct='%1.1f%%',
+                                      startangle=90)
+    ax2.set_title('GC Content', fontsize=14, fontweight='bold')
+    
+    # Plot 3: Arc diagram showing base pairs
+    ax3.set_xlim(0, len(sequence))
+    ax3.set_ylim(0, len(sequence) // 4)
+    
+    # Draw sequence
+    for i, base in enumerate(sequence):
+        color = {'A': '#e74c3c', 'U': '#3498db', 'G': '#2ecc71', 'C': '#f39c12'}[base]
+        ax3.scatter(i, 0, c=color, s=80, alpha=0.8, edgecolor='black', linewidth=1)
+        ax3.text(i, -0.5, base, ha='center', va='center', fontweight='bold', fontsize=8)
+    
+    # Draw base pair arcs
+    stack = []
+    pair_colors = plt.cm.Set3(np.linspace(0, 1, 12))
+    color_idx = 0
+    
+    for i, symbol in enumerate(structure):
+        if symbol == '(':
+            stack.append(i)
+        elif symbol == ')' and stack:
+            start = stack.pop()
+            
+            # Draw arc
+            center = (start + i) / 2
+            radius = (i - start) / 2
+            height = radius * 0.8
+            
+            # Create arc
+            theta = np.linspace(0, np.pi, 50)
+            x_arc = center + radius * np.cos(theta)
+            y_arc = height * np.sin(theta)
+            
+            ax3.plot(x_arc, y_arc, color=pair_colors[color_idx % len(pair_colors)], 
+                    linewidth=2.5, alpha=0.8)
+            
+            # Mark base pair with lines
+            ax3.plot([start, start], [0, height * 0.1], 'k-', linewidth=1.5, alpha=0.6)
+            ax3.plot([i, i], [0, height * 0.1], 'k-', linewidth=1.5, alpha=0.6)
+            
+            color_idx += 1
+    
+    ax3.set_title('RNA Secondary Structure - Arc Diagram', fontsize=14, fontweight='bold')
+    ax3.set_xlabel('Sequence Position')
+    ax3.set_ylabel('Base Pair Distance')
+    ax3.grid(True, alpha=0.3)
+    ax3.set_xlim(-1, len(sequence))
+    
+    # Plot 4: Linear structure representation
     x = range(len(sequence))
     y = []
     depth = 0
@@ -196,15 +324,81 @@ def create_structure_plot(sequence, structure, energy):
             depth -= 1
         y.append(depth)
     
-    ax2.plot(x, y, 'b-', linewidth=2)
-    ax2.fill_between(x, y, alpha=0.3)
-    ax2.set_title(f'Secondary Structure Profile (ΔG ≈ {energy:.2f} kcal/mol)')
-    ax2.set_xlabel('Position')
-    ax2.set_ylabel('Structure Depth')
-    ax2.grid(True, alpha=0.3)
+    # Create gradient fill
+    ax4.plot(x, y, 'b-', linewidth=3, alpha=0.8)
+    ax4.fill_between(x, y, alpha=0.4, color='lightblue')
+    
+    # Highlight different structural regions
+    current_depth = 0
+    for i, (pos, depth_val) in enumerate(zip(x, y)):
+        if depth_val != current_depth:
+            if depth_val > current_depth:  # Opening
+                ax4.axvline(pos, color='green', alpha=0.6, linestyle='--', linewidth=1)
+            else:  # Closing
+                ax4.axvline(pos, color='red', alpha=0.6, linestyle='--', linewidth=1)
+            current_depth = depth_val
+    
+    ax4.set_title(f'Structure Depth Profile (ΔG ≈ {energy:.2f} kcal/mol)', fontsize=14, fontweight='bold')
+    ax4.set_xlabel('Sequence Position')
+    ax4.set_ylabel('Nesting Depth')
+    ax4.grid(True, alpha=0.3)
+    
+    # Add annotations for structural features
+    base_pairs = structure.count('(')
+    max_depth = max(y) if y else 0
+    
+    textstr = f'Base Pairs: {base_pairs}\nMax Nesting: {max_depth}\nLength: {len(sequence)}'
+    props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+    ax4.text(0.02, 0.98, textstr, transform=ax4.transAxes, fontsize=10,
+             verticalalignment='top', bbox=props)
     
     plt.tight_layout()
     return fig
+
+def create_detailed_structure_analysis(sequence, structure):
+    """Create detailed analysis of structural elements"""
+    predictor = RNAStructurePredictor()
+    elements = predictor.analyze_structure_elements(sequence, structure)
+    
+    analysis = {
+        'hairpins': [],
+        'internal_loops': [],
+        'stems': []
+    }
+    
+    # Analyze each element
+    for element in elements:
+        if element['type'] == 'hairpin':
+            loop_seq = sequence[element['start']+1:element['end']]
+            analysis['hairpins'].append({
+                'position': f"{element['start']}-{element['end']}",
+                'loop_sequence': loop_seq,
+                'loop_size': element['loop_size'],
+                'stem_length': element['stem_length']
+            })
+        elif element['type'] == 'internal_loop':
+            loop_seq = sequence[element['start']+1:element['end']]
+            analysis['internal_loops'].append({
+                'position': f"{element['start']}-{element['end']}",
+                'loop_sequence': loop_seq,
+                'loop_size': element['loop_size']
+            })
+    
+    # Find stems
+    stack = []
+    for i, symbol in enumerate(structure):
+        if symbol == '(':
+            stack.append(i)
+        elif symbol == ')' and stack:
+            start = stack.pop()
+            base_pair = f"{sequence[start]}-{sequence[i]}"
+            analysis['stems'].append({
+                'position': f"{start}-{i}",
+                'base_pair': base_pair,
+                'pair_type': 'Watson-Crick' if (sequence[start], sequence[i]) in [('G','C'), ('C','G'), ('A','U'), ('U','A')] else 'Wobble'
+            })
+    
+    return analysis
 
 def main():
     # Header
@@ -212,7 +406,7 @@ def main():
     
     st.markdown("""
     This application predicts RNA secondary structure using a simplified dynamic programming algorithm 
-    based on thermodynamic principles. Enter an RNA sequence to get structure predictions and analysis.
+    based on thermodynamic principles. Enter an RNA sequence to get structure predictions and detailed analysis.
     """)
     
     # Sidebar
@@ -224,8 +418,9 @@ def main():
         examples = {
             "tRNA-like": "GCGCAAUUAGGCGCGUCCCUCCACCCUGUGCCUUUCCAGGGCUGGGCAAGAUUCUGCGAACGACUCCCGCCGUGUUU",
             "Hairpin": "GGCUUUAGCCUUCGCCACCAUGAGCGUGGUACCUCCGAGCUUCGAGCGGCCCC",
-            "Simple": "GGGGAAAACCCC",
-            "Complex": "CUGCUGUCAGCCGGACUACUUGUGCGCGCAAUAACCCUAGGGCUGCCUUCGGGAACCUGUCUGUAA"
+            "Simple Hairpin": "GGGGAAAACCCC",
+            "Complex Structure": "CUGCUGUCAGCCGGACUACUUGUGCGCGCAAUAACCCUAGGGCUGCCUUCGGGAACCUGUCUGUAA",
+            "Multiple Hairpins": "GGCUUUAGCCCCAAAAGGGGUUUUCCCC"
         }
         
         selected_example = st.selectbox("Choose an example:", ["None"] + list(examples.keys()))
@@ -326,17 +521,67 @@ def main():
                 <p><strong>Estimated Free Energy (ΔG):</strong> {energy:.2f} kcal/mol</p>
                 <p><strong>Base Pairs:</strong> {base_pairs}</p>
                 <p><strong>Pairing Efficiency:</strong> {(base_pairs * 2 / len(processed_seq) * 100):.1f}%</p>
+                <p><strong>Structure Stability:</strong> {'High' if energy < -10 else 'Medium' if energy < -5 else 'Low'}</p>
             </div>
             ''', unsafe_allow_html=True)
             
-            # Visualization
-            st.markdown('<div class="section-header">Structure Visualization</div>', unsafe_allow_html=True)
+            # Comprehensive Visualization
+            st.markdown('<div class="section-header">Comprehensive Structure Visualization</div>', unsafe_allow_html=True)
             
-            fig = create_structure_plot(processed_seq, structure, energy)
+            fig = create_structure_visualization(processed_seq, structure, energy)
             st.pyplot(fig)
             
+            # Detailed structural analysis
+            st.markdown('<div class="section-header">Structural Elements Analysis</div>', unsafe_allow_html=True)
+            
+            analysis = create_detailed_structure_analysis(processed_seq, structure)
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.markdown("#### 🎀 Hairpin Loops")
+                if analysis['hairpins']:
+                    for i, hairpin in enumerate(analysis['hairpins']):
+                        st.markdown(f"**Hairpin {i+1}:**")
+                        st.markdown(f"- Position: {hairpin['position']}")
+                        st.markdown(f"- Loop sequence: `{hairpin['loop_sequence']}`")
+                        st.markdown(f"- Loop size: {hairpin['loop_size']} nt")
+                        st.markdown(f"- Stem length: {hairpin['stem_length']} bp")
+                        st.markdown("---")
+                else:
+                    st.markdown("No hairpin loops detected")
+            
+            with col2:
+                st.markdown("#### 🔄 Internal Loops")
+                if analysis['internal_loops']:
+                    for i, loop in enumerate(analysis['internal_loops']):
+                        st.markdown(f"**Internal Loop {i+1}:**")
+                        st.markdown(f"- Position: {loop['position']}")
+                        st.markdown(f"- Loop sequence: `{loop['loop_sequence']}`")
+                        st.markdown(f"- Size: {loop['loop_size']} nt")
+                        st.markdown("---")
+                else:
+                    st.markdown("No internal loops detected")
+            
+            with col3:
+                st.markdown("#### 🔗 Base Pairs")
+                if analysis['stems']:
+                    pair_counts = {'Watson-Crick': 0, 'Wobble': 0}
+                    for stem in analysis['stems']:
+                        pair_counts[stem['pair_type']] += 1
+                    
+                    st.markdown(f"**Total pairs:** {len(analysis['stems'])}")
+                    st.markdown(f"**Watson-Crick:** {pair_counts['Watson-Crick']}")
+                    st.markdown(f"**Wobble pairs:** {pair_counts['Wobble']}")
+                    
+                    with st.expander("View all base pairs"):
+                        for stem in analysis['stems']:
+                            st.markdown(f"- {stem['position']}: `{stem['base_pair']}` ({stem['pair_type']})")
+                else:
+                    st.markdown("No base pairs detected")
+            
             # Detailed analysis
-            with st.expander("📊 Detailed Analysis"):
+            with st.expander("📊 Complete Sequence Analysis"):
                 st.markdown("#### Base Composition")
                 comp_df = pd.DataFrame([composition]).T
                 comp_df.columns = ['Count']
@@ -349,7 +594,8 @@ def main():
                     'Opening brackets': structure.count('('),
                     'Closing brackets': structure.count(')'),
                     'Total base pairs': base_pairs,
-                    'Structure complexity': len(set(structure))
+                    'Maximum nesting depth': max([structure[:i+1].count('(') - structure[:i+1].count(')') for i in range(len(structure))]),
+                    'Average loop size': np.mean([len(loop['loop_sequence']) for loop in analysis['hairpins'] + analysis['internal_loops']]) if (analysis['hairpins'] or analysis['internal_loops']) else 0
                 }
                 st.json(struct_stats)
                 
@@ -367,6 +613,11 @@ Estimated ΔG: {energy:.2f} kcal/mol
 
 Base composition:
 {chr(10).join([f"{base}: {count} ({count/len(processed_seq)*100:.1f}%)" for base, count in composition.items()])}
+
+Structural Elements:
+Hairpins: {len(analysis['hairpins'])}
+Internal loops: {len(analysis['internal_loops'])}
+Total base pairs: {len(analysis['stems'])}
 """
             
             st.download_button(
