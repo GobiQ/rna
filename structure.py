@@ -478,12 +478,12 @@ def create_2d_structure_plot(sequence: str, structure: str, energy: float, show_
     # Create figure
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 10))
     
-    # Plot 1: Hierarchical layout
-    _plot_structure_layout(ax1, sequence, structure, positions, "Hierarchical Layout", energy, show_labels, color_by_depth)
-    
-    # Plot 2: Radial layout for comparison
+    # Plot 1: Radial layout (default)
     radial_positions = layout_engine.calculate_radial_layout()
-    _plot_structure_layout(ax2, sequence, structure, radial_positions, "Radial Layout", energy, show_labels, color_by_depth)
+    _plot_structure_layout(ax1, sequence, structure, radial_positions, "Radial Layout", energy, show_labels, color_by_depth)
+    
+    # Plot 2: Hierarchical layout for comparison
+    _plot_structure_layout(ax2, sequence, structure, positions, "Hierarchical Layout", energy, show_labels, color_by_depth)
     
     plt.tight_layout()
     return fig
@@ -529,12 +529,20 @@ def _plot_structure_layout(ax, sequence: str, structure: str, positions: Dict[in
         
         # Add position number (for reference)
         ax.text(x, y-0.6, str(i+1), ha='center', va='center', fontsize=8, color='gray')
+        
+        # Add residue numbers every 10 nucleotides
+        if (i+1) % 10 == 0:
+            ax.text(x, y+0.7, str(i+1), ha='center', va='center',
+                    fontsize=8.5, color='dimgray')
     
-    # Draw base pairs
+    # Draw backbone between consecutive residues
+    for i in range(len(sequence) - 1):
+        x1, y1 = positions[i]
+        x2, y2 = positions[i+1]
+        ax.plot([x1, x2], [y1, y2], color='#9e9e9e', linewidth=1.5, alpha=0.9, zorder=0)
+    
+    # Draw base pairs as short sticks
     stack = []
-    pair_colors = plt.cm.Set3(np.linspace(0, 1, 12))
-    color_idx = 0
-    
     for i, char in enumerate(structure):
         if char == '(':
             stack.append(i)
@@ -545,40 +553,77 @@ def _plot_structure_layout(ax, sequence: str, structure: str, positions: Dict[in
             pos1 = positions[j]
             pos2 = positions[i]
             
-            # Draw base pair line
-            ax.plot([pos1[0], pos2[0]], [pos1[1], pos2[1]], 
-                   color=pair_colors[color_idx % len(pair_colors)], 
-                   linewidth=3, alpha=0.7, zorder=1)
-            
-            # Draw Watson-Crick symbols
-            mid_x = (pos1[0] + pos2[0]) / 2
-            mid_y = (pos1[1] + pos2[1]) / 2
-            
+            # Compute short segment centered at midpoint
+            mx = (pos1[0] + pos2[0]) / 2.0
+            my = (pos1[1] + pos2[1]) / 2.0
+            vx = pos2[0] - pos1[0]
+            vy = pos2[1] - pos1[1]
+            L = (vx**2 + vy**2) ** 0.5 + 1e-9
+            ux, uy = vx / L, vy / L         # unit along-pair
+            px, py = -uy, ux                # unit perpendicular
+
+            half = 0.45                      # half-length of the stick
+            x1s, y1s = mx - ux*half, my - uy*half
+            x2s, y2s = mx + ux*half, my + uy*half
+
+            # Main stick (blue-ish like the reference)
+            ax.plot([x1s, x2s], [y1s, y2s], color='#2d6cdf', linewidth=3, alpha=0.9, zorder=2)
+
+            # Bond style overlays
             base1, base2 = sequence[j], sequence[i]
-            if (base1, base2) in [('G', 'C'), ('C', 'G')]:
-                # Triple bond for GC
-                for offset in [-0.1, 0, 0.1]:
-                    ax.plot([pos1[0], pos2[0]], [pos1[1] + offset, pos2[1] + offset], 
-                           'k-', linewidth=1, alpha=0.5)
-            elif (base1, base2) in [('A', 'U'), ('U', 'A'), ('A', 'T'), ('T', 'A')]:
-                # Double bond for AU/AT
-                for offset in [-0.05, 0.05]:
-                    ax.plot([pos1[0], pos2[0]], [pos1[1] + offset, pos2[1] + offset], 
-                           'k-', linewidth=1, alpha=0.5)
-            elif (base1, base2) in [('G', 'U'), ('U', 'G')]:
-                # Wobble pair - dashed line
-                ax.plot([pos1[0], pos2[0]], [pos1[1], pos2[1]], 
-                       'k--', linewidth=2, alpha=0.5)
-            
-            color_idx += 1
+            if (base1, base2) in [('G','C'), ('C','G')]:
+                # Triple: 3 thin parallel lines
+                for off in (-0.10, 0.0, 0.10):
+                    ax.plot([x1s+px*off, x2s+px*off], [y1s+py*off, y2s+py*off], 'k-', lw=1, alpha=0.5, zorder=3)
+            elif (base1, base2) in [('A','U'), ('U','A'), ('A','T'), ('T','A')]:
+                for off in (-0.07, 0.07):
+                    ax.plot([x1s+px*off, x2s+px*off], [y1s+py*off, y2s+py*off], 'k-', lw=1, alpha=0.5, zorder=3)
+            else:
+                ax.plot([x1s, x2s], [y1s, y2s], 'k--', lw=2, alpha=0.5, zorder=3)
     
-    # Identify and label structural elements only if requested
+    # Identify and label structural elements only if requested (largest few only)
     if show_labels:
-        _label_structural_elements(ax, sequence, structure, positions)
+        layout_engine = RNA2DLayoutEngine(sequence, structure)
+        elems = layout_engine._analyze_structure_elements()
+        # Keep the biggest few by loop_size
+        elems = sorted(elems, key=lambda e: (e.loop_size or 0), reverse=True)[:5]
+        _label_structural_elements(ax, sequence, structure, positions, elems)
     
     # Set axis properties
     ax.set_aspect('equal')
-    ax.set_title(f'{title}\nΔG ≈ {energy:.2f} kcal/mol', fontsize=14, fontweight='bold')
+    
+    # Calculate energy components for better display
+    partner = build_partner_map(structure)
+    pair_energy = 0.0
+    loop_energy = 0.0
+    visited = set()
+    
+    # Calculate pair energies
+    for i in range(len(sequence)):
+        j = partner[i]
+        if j != -1 and i < j and (i,j) not in visited:
+            visited.add((i,j))
+            pair_energy += RNAStructurePredictor().get_pairing_energy(sequence[i], sequence[j])
+    
+    # Calculate loop penalties
+    layout_engine = RNA2DLayoutEngine(sequence, structure)
+    elems = layout_engine._analyze_structure_elements()
+    predictor = RNAStructurePredictor()
+    for e in elems:
+        if e.type == "hairpin":
+            L = e.loop_size
+            if L <= 9:
+                loop_energy += predictor.loop_penalties['hairpin'].get(L, 7.0)
+            else:
+                loop_energy += 7.0 + 1.75 * np.log(L/9.0)
+        elif e.type == "bulge":
+            loop_energy += predictor.loop_penalties['bulge'] + 0.3 * e.loop_size
+        elif e.type == "internal_loop":
+            loop_energy += predictor.loop_penalties['internal'] + 0.2 * e.loop_size
+        elif e.type == "multibranch":
+            loop_energy += 3.0 + 0.5 * 3
+    
+    ax.set_title(f'{title}\nPair={pair_energy:.1f}  Loop={loop_energy:.1f}  ΔG≈{energy:.1f}', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3)
     
     # Add legend
@@ -593,46 +638,86 @@ def _plot_structure_layout(ax, sequence: str, structure: str, positions: Dict[in
     ]
     ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.15, 1))
 
-def _label_structural_elements(ax, sequence: str, structure: str, positions: Dict[int, Tuple[float, float]]):
+def _label_structural_elements(ax, sequence: str, structure: str, positions: Dict[int, Tuple[float, float]], elements: List[StructuralElement] = None):
     """Add labels for structural elements like loops, stems, etc."""
     
-    # Find hairpin loops
-    stack = []
-    for i, char in enumerate(structure):
-        if char == '(':
-            stack.append(i)
-        elif char == ')' and stack:
-            start = stack.pop()
-            loop_size = i - start - 1
-            
-            if loop_size > 0 and loop_size <= 8:  # Hairpin loop
+    if elements is None:
+        # Fallback to old behavior if no elements provided
+        stack = []
+        for i, char in enumerate(structure):
+            if char == '(':
+                stack.append(i)
+            elif char == ')' and stack:
+                start = stack.pop()
+                loop_size = i - start - 1
+                
+                if loop_size > 0 and loop_size <= 8:  # Hairpin loop
+                    # Calculate center of loop
+                    loop_positions = [positions[j] for j in range(start + 1, i)]
+                    if loop_positions:
+                        center_x = np.mean([pos[0] for pos in loop_positions])
+                        center_y = np.mean([pos[1] for pos in loop_positions])
+                        
+                        # Add hairpin label
+                        ax.annotate('hairpin loop', 
+                                  xy=(center_x, center_y), 
+                                  xytext=(center_x + 1, center_y + 1),
+                                  arrowprops=dict(arrowstyle='->', color='blue', alpha=0.7),
+                                  fontsize=10, color='blue', fontweight='bold',
+                                  bbox=dict(boxstyle="round,pad=0.3", facecolor='lightblue', alpha=0.7))
+                
+                elif loop_size > 8:  # Internal loop
+                    loop_positions = [positions[j] for j in range(start + 1, i)]
+                    if loop_positions:
+                        center_x = np.mean([pos[0] for pos in loop_positions])
+                        center_y = np.mean([pos[1] for pos in loop_positions])
+                        
+                        # Add internal loop label
+                        ax.annotate('internal loop', 
+                                  xy=(center_x, center_y), 
+                                  xytext=(center_x + 1, center_y - 1),
+                                  arrowprops=dict(arrowstyle='->', color='purple', alpha=0.7),
+                                  fontsize=10, color='purple', fontweight='bold',
+                                  bbox=dict(boxstyle="round,pad=0.3", facecolor='plum', alpha=0.7))
+    else:
+        # Use provided elements (filtered to largest few)
+        for element in elements:
+            if element.loop_size and element.loop_size > 0:
                 # Calculate center of loop
-                loop_positions = [positions[j] for j in range(start + 1, i)]
+                loop_positions = [positions[j] for j in range(element.start + 1, element.end)]
                 if loop_positions:
                     center_x = np.mean([pos[0] for pos in loop_positions])
                     center_y = np.mean([pos[1] for pos in loop_positions])
                     
-                    # Add hairpin label
-                    ax.annotate('hairpin loop', 
+                    # Choose color and label based on type
+                    if element.type == 'hairpin':
+                        color = 'blue'
+                        bgcolor = 'lightblue'
+                        label = 'hairpin loop'
+                    elif element.type == 'internal_loop':
+                        color = 'purple'
+                        bgcolor = 'plum'
+                        label = 'internal loop'
+                    elif element.type == 'bulge':
+                        color = 'orange'
+                        bgcolor = 'moccasin'
+                        label = 'bulge'
+                    elif element.type == 'multibranch':
+                        color = 'red'
+                        bgcolor = 'mistyrose'
+                        label = 'multibranch'
+                    else:
+                        color = 'gray'
+                        bgcolor = 'lightgray'
+                        label = element.type
+                    
+                    # Add label
+                    ax.annotate(label, 
                               xy=(center_x, center_y), 
                               xytext=(center_x + 1, center_y + 1),
-                              arrowprops=dict(arrowstyle='->', color='blue', alpha=0.7),
-                              fontsize=10, color='blue', fontweight='bold',
-                              bbox=dict(boxstyle="round,pad=0.3", facecolor='lightblue', alpha=0.7))
-            
-            elif loop_size > 8:  # Internal loop
-                loop_positions = [positions[j] for j in range(start + 1, i)]
-                if loop_positions:
-                    center_x = np.mean([pos[0] for pos in loop_positions])
-                    center_y = np.mean([pos[1] for pos in loop_positions])
-                    
-                    # Add internal loop label
-                    ax.annotate('internal loop', 
-                              xy=(center_x, center_y), 
-                              xytext=(center_x + 1, center_y - 1),
-                              arrowprops=dict(arrowstyle='->', color='purple', alpha=0.7),
-                              fontsize=10, color='purple', fontweight='bold',
-                              bbox=dict(boxstyle="round,pad=0.3", facecolor='plum', alpha=0.7))
+                              arrowprops=dict(arrowstyle='->', color=color, alpha=0.7),
+                              fontsize=10, color=color, fontweight='bold',
+                              bbox=dict(boxstyle="round,pad=0.3", facecolor=bgcolor, alpha=0.7))
 
 def analyze_sequence(sequence):
     """Analyze RNA sequence composition"""
@@ -856,8 +941,8 @@ def main():
         
         # Layout options
         st.markdown("#### Visualization Options")
-        layout_type = st.selectbox("Layout Algorithm:", ["Hierarchical", "Radial", "Both"])
-        show_labels = st.checkbox("Show structural element labels", value=True)
+        layout_type = st.selectbox("Layout Algorithm:", ["Radial", "Hierarchical", "Both"])
+        show_labels = st.checkbox("Show structural element labels", value=False)
         show_energy_profile = st.checkbox("Show energy landscape", value=True)
         color_by_structure = st.checkbox("Color by structure depth", value=False)
         
@@ -1029,10 +1114,10 @@ def main():
                 # Single layout
                 layout_engine = RNA2DLayoutEngine(processed_seq, structure)
                 
-                if layout_type == "Hierarchical":
-                    positions = layout_engine.calculate_hierarchical_layout()
-                else:  # Radial
+                if layout_type == "Radial":
                     positions = layout_engine.calculate_radial_layout()
+                else:  # Hierarchical
+                    positions = layout_engine.calculate_hierarchical_layout()
                 
                 fig, ax = plt.subplots(1, 1, figsize=(15, 12))
                 _plot_structure_layout(ax, processed_seq, structure, positions, f"{layout_type} Layout", energy, show_labels, color_by_structure)
