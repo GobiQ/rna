@@ -94,6 +94,11 @@ class RNAStructurePredictor:
         """Validate RNA sequence (allows T for DNA sequences)"""
         return bool(re.match(r'^[AUTGC]+$', sequence.upper()))
     
+    def get_invalid_characters(self, sequence):
+        """Get list of invalid characters in sequence"""
+        valid_chars = set('AUTGC')
+        return [char for char in set(sequence.upper()) if char not in valid_chars]
+    
     def can_pair(self, base1, base2):
         """Check if two bases can pair"""
         return (base1, base2) in self.base_pairs
@@ -245,6 +250,14 @@ def create_structure_visualization(sequence, structure, energy):
     counts = [sequence.count(base) for base in bases]
     colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12']
     
+    # Add unknown bases if any exist
+    valid_bases = set(bases)
+    unknown_bases = [base for base in set(sequence) if base not in valid_bases]
+    if unknown_bases:
+        bases.extend(unknown_bases)
+        counts.extend([sequence.count(base) for base in unknown_bases])
+        colors.extend(['#95a5a6'] * len(unknown_bases))  # Gray for unknown
+    
     bars = ax1.bar(bases, counts, color=colors, alpha=0.8, edgecolor='white', linewidth=2)
     ax1.set_title('Base Composition', fontsize=14, fontweight='bold')
     ax1.set_ylabel('Count')
@@ -272,8 +285,11 @@ def create_structure_visualization(sequence, structure, energy):
     ax3.set_ylim(0, len(sequence) // 4)
     
     # Draw sequence
+    base_colors = {'A': '#e74c3c', 'U': '#3498db', 'G': '#2ecc71', 'C': '#f39c12'}
+    default_color = '#95a5a6'  # Gray for unknown bases
+    
     for i, base in enumerate(sequence):
-        color = {'A': '#e74c3c', 'U': '#3498db', 'G': '#2ecc71', 'C': '#f39c12'}[base]
+        color = base_colors.get(base, default_color)
         ax3.scatter(i, 0, c=color, s=80, alpha=0.8, edgecolor='black', linewidth=1)
         ax3.text(i, -0.5, base, ha='center', va='center', fontweight='bold', fontsize=8)
     
@@ -629,8 +645,13 @@ Total base pairs: {len(analysis['stems'])}
             )
             
         else:
-            st.error("❌ Invalid RNA sequence! Please use only A, U, G, C nucleotides.")
-            st.info("💡 Tip: Enable 'Convert T to U' if you have a DNA sequence.")
+            invalid_chars = predictor.get_invalid_characters(processed_seq)
+            if invalid_chars:
+                st.error(f"❌ Invalid characters found: {', '.join(invalid_chars)}")
+                st.info("💡 Please use only A, U, G, C nucleotides. Enable 'Convert T to U' if you have a DNA sequence.")
+            else:
+                st.error("❌ Invalid RNA sequence! Please use only A, U, G, C nucleotides.")
+                st.info("💡 Tip: Enable 'Convert T to U' if you have a DNA sequence.")
     
     # Footer
     st.markdown("---")
